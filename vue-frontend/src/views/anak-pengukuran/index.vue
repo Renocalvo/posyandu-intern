@@ -157,21 +157,50 @@ const filteredRows = computed(() => {
   return rows.value.filter(item => {
     const label = posyanduLabel(item) || ''
 
+    // Mengecek apakah ada data tinggi badan sebelumnya dan saat ini
+    const prevTinggi = item?.tinggi_prev // Data tinggi sebelumnya
+    const currTinggi = item?.tinggi      // Data tinggi saat ini
+
+    // Deteksi anomali pengukuran tinggi badan
+    let isAnomaly = false
+
+    if (currTinggi && prevTinggi) {
+      const heightDifference = Math.abs(currTinggi - prevTinggi)
+
+      // Menganggap perbedaan lebih dari 3 cm sebagai anomali yang perlu diperiksa lebih lanjut
+      if (heightDifference > 3) {
+        isAnomaly = true
+      }
+
+      // Cek jika tinggi badan menurun lebih dari 1 cm, kecuali saat anak sangat kecil dan dapat terjadi secara alami (misalnya, 2 tahun ke bawah)
+      if (heightDifference > 1 && currTinggi < prevTinggi) {
+        // Asumsi bahwa penurunan tinggi badan pada anak di bawah usia 2 tahun mungkin normal (perlu konfirmasi lebih lanjut)
+        if (!(item?.anak?.umur && item.anak.umur < 2)) {
+          isAnomaly = true
+        }
+      }
+    } else {
+      // Jika data tinggi badan tidak lengkap, anggap sebagai anomali
+      isAnomaly = true
+    }
+
+    // Tandai data sebagai anomali jika ditemukan perubahan tinggi badan yang mencurigakan
+    item.isAnomaly = isAnomaly
+
+    // Filter berdasarkan kondisi lainnya
     // Posyandu
     if (filterPosyandu.value && label !== filterPosyandu.value) return false
 
     // Tanggal Ukur
     if ((tglFrom.value || tglTo.value) && !inDateRange(item?.tanggal_ukur, tglFrom.value, tglTo.value)) return false
 
-    // Rentang numerik
-    if ((beratFrom.value || beratTo.value)   && !inNumRange(item?.berat,           beratFrom.value,  beratTo.value))   return false
-    if ((tinggiFrom.value || tinggiTo.value) && !inNumRange(item?.tinggi,          tinggiFrom.value, tinggiTo.value))  return false
-    if ((lilaFrom.value || lilaTo.value)     && !inNumRange(item?.lila,            lilaFrom.value,   lilaTo.value))    return false
-    if ((lkFrom.value || lkTo.value)         && !inNumRange(item?.lingkar_kepala,  lkFrom.value,     lkTo.value))      return false
+    // Rentang numerik (berat, tinggi, LILA, lingkar kepala)
+    if ((beratFrom.value || beratTo.value) && !inNumRange(item?.berat, beratFrom.value, beratTo.value)) return false
+    if ((tinggiFrom.value || tinggiTo.value) && !inNumRange(item?.tinggi, tinggiFrom.value, tinggiTo.value)) return false
+    if ((lilaFrom.value || lilaTo.value) && !inNumRange(item?.lila, lilaFrom.value, lilaTo.value)) return false
+    if ((lkFrom.value || lkTo.value) && !inNumRange(item?.lingkar_kepala, lkFrom.value, lkTo.value)) return false
 
-    // === Filter tambahan ===
-
-    // ASI: minimal salah satu bulan pilihan bernilai true
+    // Filter tambahan lainnya seperti ASI, Vitamin A, dan Kelas Ibu
     if (Array.isArray(selAsi) && selAsi.length > 0) {
       const anyOn = selAsi.some(mIdx => {
         const raw = getAsi(item, mIdx)
@@ -180,7 +209,6 @@ const filteredRows = computed(() => {
       if (!anyOn) return false
     }
 
-    // Vitamin A: warna spesifik atau kosong
     if (selVita) {
       const color = vitaColor(getVita(item))
       if (selVita === 'KOSONG') {
@@ -191,18 +219,21 @@ const filteredRows = computed(() => {
       }
     }
 
-    // Kelas Ibu
-    if (selKelas === 'YA'    && !fmtBool(getKelasIbu(item))) return false
-    if (selKelas === 'TIDAK' &&  fmtBool(getKelasIbu(item))) return false
+    if (selKelas === 'YA' && !fmtBool(getKelasIbu(item))) return false
+    if (selKelas === 'TIDAK' && fmtBool(getKelasIbu(item))) return false
 
-    // Keyword
-    if (!keyword) return true
-    const nikStr   = String(item?.anak?.nik ?? '').toLowerCase()
-    const namaStr  = String(item?.anak?.nama_anak ?? '').toLowerCase()
-    const labelStr = String(label).toLowerCase()
-    return nikStr.includes(keyword) || namaStr.includes(keyword) || labelStr.includes(keyword)
+    // Keyword filter
+    if (keyword) {
+      const nikStr = String(item?.anak?.nik ?? '').toLowerCase()
+      const namaStr = String(item?.anak?.nama_anak ?? '').toLowerCase()
+      const labelStr = String(label).toLowerCase()
+      return nikStr.includes(keyword) || namaStr.includes(keyword) || labelStr.includes(keyword)
+    }
+
+    return true // Pastikan semua filter lainnya juga diterapkan
   })
 })
+
 
 /* =================== ACTIONS =================== */
 const deleteData = async (id) => {
@@ -370,6 +401,134 @@ const resetFilter = () => {
   filterVita.value = ''
   filterKelasIbu.value = ''
 }
+
+/* =================== COMPARE DATA =================== */
+const showDataComparison = async (item) => {
+  // Ambil data pengukuran terbaru
+  try {
+    const nik = item?.anak?.nik;
+
+    // Ambil data pengukuran terbaru
+    const resLatest = await api.get(`/anak-pengukuran/${nik}`);
+    const latestData = resLatest.data;
+
+    // Ambil data log pengukuran lama
+    const resLog = await api.get(`/log-pengukuran/nik/${nik}`);
+    const logData = resLog.data;
+
+    // Cek apakah ada data log pengukuran
+    if (logData.length === 0) {
+      // Jika tidak ada log pengukuran, langsung tampilkan data terbaru (karena ini data pertama)
+      Swal.fire({
+        title: 'Data Pengukuran Terbaru',
+        html: `
+          <div><b>Nama Anak:</b> ${item?.anak?.nama_anak || '-'}</div>
+          <div><b>NIK:</b> ${item?.anak?.nik || '-'} </div>
+          <div class="mt-2"><b>Data Pengukuran Terbaru</b></div>
+          <ul>
+            <li><b>Tinggi Badan:</b> ${latestData?.tinggi || '-'} cm</li>
+            <li><b>Berat Badan:</b> ${latestData?.berat || '-'} kg</li>
+            <li><b>LILA:</b> ${latestData?.lila || '-'} cm</li>
+            <li><b>Tanggal Ukur:</b> ${toDisplayDate(latestData?.tanggal_ukur) || '-'}</li>
+          </ul>
+        `,
+        confirmButtonText: 'Tutup',
+        icon: 'info',
+      });
+      return; // Tidak melanjutkan ke perbandingan jika tidak ada log pengukuran
+    }
+
+    // Jika ada data log pengukuran, tampilkan perbandingan
+    const prevData = logData[0]; // Mengambil data log pengukuran pertama
+    const currData = latestData;
+
+    // Menampilkan modal perbandingan
+    Swal.fire({
+      title: 'Perbandingan Data Pengukuran',
+      html: `
+        <div><b>Nama Anak:</b> ${item?.anak?.nama_anak || '-'}</div>
+        <div><b>NIK:</b> ${item?.anak?.nik || '-'} </div>
+        
+        <div class="mt-2"><b>Data Pengukuran Sebelumnya</b></div>
+        <ul>
+          <li><b>Tinggi Badan:</b> ${prevData?.tinggi_lama || '-'} cm</li>
+          <li><b>Berat Badan:</b> ${prevData?.berat_lama || '-'} kg</li>
+          <li><b>LILA:</b> ${prevData?.lila_lama || '-'} cm</li>
+          <li><b>Tanggal Ukur:</b> ${toDisplayDate(prevData?.tanggal_ukur_lama) || '-'}</li>
+        </ul>
+
+        <div class="mt-2"><b>Data Pengukuran Terbaru</b></div>
+        <ul>
+          <li><b>Tinggi Badan:</b> ${currData?.tinggi || '-'} cm</li>
+          <li><b>Berat Badan:</b> ${currData?.berat || '-'} kg</li>
+          <li><b>LILA:</b> ${currData?.lila || '-'} cm</li>
+          <li><b>Tanggal Ukur:</b> ${toDisplayDate(currData?.tanggal_ukur) || '-'}</li>
+        </ul>
+        
+        <div class="mt-2">
+          <label>Pilih data yang akan dipakai:</label>
+          <select id="data-pilihan" class="form-select">
+            <option value="prev">Data Sebelumnya</option>
+            <option value="curr">Data Terbaru</option>
+          </select>
+        </div>
+      `,
+      showCancelButton: true,
+      confirmButtonText: 'Pilih',
+      cancelButtonText: 'Batal',
+      customClass: {
+        confirmButton: 'btn btn-primary',
+        cancelButton: 'btn btn-secondary'
+      },
+      preConfirm: () => {
+        const selectedData = document.getElementById('data-pilihan').value;
+        // Lakukan update data sesuai pilihan
+        updateDataSelection(item, selectedData, currData, prevData);
+      }
+    });
+  } catch (error) {
+    await Swal.fire({
+      title: 'Error',
+      text: 'Gagal mengambil data perbandingan.',
+      icon: 'error',
+      confirmButtonText: 'Tutup'
+    });
+  }
+};
+
+
+/* =================== UPDATE DATA SETELAH DI COMPARE =================== */
+const updateDataSelection = async (item, selectedData, currData, prevData) => {
+  try {
+    const updatedData = {
+      tinggi: selectedData === 'prev' ? prevData?.tinggi_lama : currData?.tinggi,
+      berat: selectedData === 'prev' ? prevData?.berat_lama : currData?.berat,
+      lila: selectedData === 'prev' ? prevData?.lila_lama : currData?.lila,
+      tanggal_ukur: selectedData === 'prev' ? prevData?.tanggal_ukur_lama : currData?.tanggal_ukur
+    };
+
+    // Lakukan update data di server
+    await api.put(`/anak-pengukuran/${item?.anak?.nik}`, updatedData);
+
+    // Informasi bahwa data berhasil diperbarui
+    await Swal.fire({
+      title: 'Data Diperbarui',
+      text: 'Data pengukuran berhasil diperbarui.',
+      icon: 'success',
+      confirmButtonText: 'Tutup'
+    });
+
+    fetchData(); // Refresh data setelah update
+  } catch (error) {
+    await Swal.fire({
+      title: 'Gagal Memperbarui',
+      text: error?.response?.data?.message ?? 'Terjadi kesalahan saat memperbarui data.',
+      icon: 'error',
+      confirmButtonText: 'Tutup'
+    });
+  }
+};
+
 </script>
 
 <template>
@@ -543,14 +702,24 @@ const resetFilter = () => {
                 </thead>
 
                 <tbody>
+                  <!-- Menampilkan pesan jika tidak ada data -->
                   <tr v-if="filteredRows.length === 0">
                     <td colspan="14" class="text-center">
                       <div class="alert alert-warning mb-0">Data tidak ditemukan.</div>
                     </td>
                   </tr>
 
+                  <!-- Menampilkan data anak dengan kondisi pengecekan anomali -->
                   <tr v-for="(item, index) in filteredRows" :key="item?.anak?.nik ?? index">
-                    <td>{{ index + 1 }}</td>
+                    <td class="text-center">
+                      <!-- Menampilkan icon peringatan jika ada anomali -->
+                      <template v-if="item.isAnomaly">
+                          <font-awesome-icon icon="fas fa-exclamation-triangle" class="text-warning" @click="showDataComparison(item)" />
+                      </template>
+                      <!-- Menampilkan nomor urut jika tidak ada anomali -->
+                      <span v-else>{{ index + 1 }}</span>
+                    </td>
+
                     <td>{{ item?.anak?.nik ?? '-/(BELUM ADA)' }}</td>
                     <td>{{ item?.anak?.nama_anak ?? '-' }}</td>
                     <td>{{ posyanduLabel(item) || '-' }}</td>
@@ -587,6 +756,7 @@ const resetFilter = () => {
                     </td>
                   </tr>
                 </tbody>
+
               </table>
             </div>
           </template>
