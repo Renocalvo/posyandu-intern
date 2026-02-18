@@ -10,16 +10,41 @@ use App\Http\Resources\Resource;
 
 class AnakController extends Controller
 {
-    public function index()
+    /**
+     * GET /api/anak
+     * List semua anak, dengan optional search
+     */
+    public function index(Request $request)
     {
-        $anak = Anak::with('posyandu')->get();
+        $query = Anak::with('posyandu');
+
+        // Support search parameter untuk typeahead
+        if ($request->filled('search')) {
+            $search = $request->search;
+            $query->where(function($q) use ($search) {
+                $q->where('nik', 'like', '%' . $search . '%')
+                  ->orWhere('nama_anak', 'like', '%' . $search . '%');
+            });
+        }
+
+        // Support pagination
+        if ($request->has('page')) {
+            $anak = $query->paginate($request->get('per_page', 15));
+        } else {
+            $anak = $query->get();
+        }
+
         return new Resource(true, 'Data Semua Anak', $anak);
     }
 
+    /**
+     * POST /api/anak
+     * Create anak baru
+     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'nik' => 'required|string|unique:anak,nik',
+            'nik' => 'required|string|unique:anak,nik|min:13|max:16',
             'anak_ke' => 'nullable|integer',
             'tgl_lahir' => 'required|date',
             'jenis_kelamin' => 'required|in:L,P',
@@ -49,6 +74,10 @@ class AnakController extends Controller
         return new Resource(true, 'Data Anak berhasil ditambahkan', $anak);
     }
 
+    /**
+     * GET /api/anak/{id}
+     * Detail anak berdasarkan ID
+     */
     public function show($id)
     {
         $anak = Anak::with('posyandu')->find($id);
@@ -60,6 +89,10 @@ class AnakController extends Controller
         return new Resource(true, 'Detail Anak', $anak);
     }
 
+    /**
+     * PUT/PATCH /api/anak/{id}
+     * Update anak berdasarkan ID
+     */
     public function update(Request $request, $id)
     {
         $anak = Anak::find($id);
@@ -69,7 +102,7 @@ class AnakController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'nik' => 'required|string|unique:anak,nik,' . $anak->id,
+            'nik' => 'required|string|unique:anak,nik,' . $anak->id . '|min:13|max:16',
             'anak_ke' => 'nullable|integer',
             'tgl_lahir' => 'required|date',
             'jenis_kelamin' => 'required|in:L,P',
@@ -99,6 +132,10 @@ class AnakController extends Controller
         return new Resource(true, 'Data Anak berhasil diperbarui', $anak);
     }
 
+    /**
+     * DELETE /api/anak/{id}
+     * Hapus anak berdasarkan ID
+     */
     public function destroy($id)
     {
         $anak = Anak::find($id);
@@ -112,6 +149,10 @@ class AnakController extends Controller
         return new Resource(true, 'Data Anak berhasil dihapus', null);
     }
 
+    /**
+     * GET /api/anak/nik/{nik}
+     * Cari anak berdasarkan NIK
+     */
     public function showByNik($nik)
     {
         $anak = Anak::with('posyandu')
