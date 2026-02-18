@@ -582,7 +582,7 @@ const showDataComparison = async (item) => {
     confirmButtonText: '<i class="fas fa-save me-2 "></i>Simpan Pilihan',
     cancelButtonText: '<i class="fas fa-times me-2"></i>Batal',
     customClass: {
-      confirmButton: 'btn btn-primary me-2',
+      confirmButton: 'btn btn-primary mx-2',
       cancelButton: 'btn btn-secondary'
     },
     buttonsStyling: false,
