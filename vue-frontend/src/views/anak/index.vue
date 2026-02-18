@@ -479,6 +479,14 @@ const deleteAnak = async (id) => {
                   </thead>
 
                   <tbody>
+                  <tr v-if="loading" class="text-center">
+                    <td colspan="14">
+                      <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                      </div>
+                    </td>
+                  </tr>
+
                     <tr v-if="filteredRows.length === 0">
                       <td colspan="21" class="text-center">
                         <div class="alert alert-warning mb-0">Data tidak ditemukan.</div>
