@@ -1076,26 +1076,34 @@ const resetFilter = () => {
                     </td>
 
                     <td class="text-center">
-                      <button 
-                        v-if="item.anomalyInfo?.hasAnomaly"
-                        @click.prevent="showDataComparison(item)"
-                        class="btn btn-sm btn-warning rounded-sm shadow border-0 me-2"
-                      >
-                        COMPARE
-                      </button>
-                      <button 
-                        @click.prevent="viewRiwayat(item?.anak?.nik, item?.anak?.nama_anak)"
-                        class="btn btn-sm btn-secondary rounded-sm shadow border-0 me-2"
-                      >
-                        RIWAYAT
-                      </button>
-                      <button 
-                        @click.prevent="deleteData(item?.id)"
-                        class="btn btn-sm btn-danger rounded-sm shadow border-0"
-                      >
-                        DELETE
-                      </button>
+                      <div class="d-flex justify-content-start flex-wrap gap-2"> <!-- Flexbox wrapper for buttons -->
+                        <!-- Tombol Compare -->
+                        <button 
+                          v-if="item.anomalyInfo?.hasAnomaly"
+                          @click.prevent="showDataComparison(item)"
+                          class="btn btn-sm btn-warning rounded-sm shadow border-0 me-2"
+                        >
+                          COMPARE
+                        </button>
+                      
+                        <!-- Tombol Riwayat -->
+                        <button 
+                          @click.prevent="viewRiwayat(item?.anak?.nik, item?.anak?.nama_anak)"
+                          class="btn btn-sm btn-secondary rounded-sm shadow border-0 me-2"
+                        >
+                          RIWAYAT
+                        </button>
+
+                        <!-- Tombol Delete -->
+                        <button 
+                          @click.prevent="deleteData(item?.id)"
+                          class="btn btn-sm btn-danger rounded-sm shadow border-0 me-2"
+                        >
+                          DELETE
+                        </button>
+                      </div>
                     </td>
+
                   </tr>
                 </tbody>
               </table>
