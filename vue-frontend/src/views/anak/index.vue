@@ -5,11 +5,17 @@ import { posyanduLabelFromRow as posyanduLabel } from '../../utils/labels'
 import api from '../../api'
 import Swal from 'sweetalert2'
 
+/* =================== STATE =================== */
 const anak = ref([])
 const loading = ref(false)
 const errorMsg = ref('')
+const dataFromSession = ref(false) // Track if data comes from session
 
-// 🔎 state search & filters
+/* =================== CACHE KEYS =================== */
+const CACHE_KEY = 'anakListData'
+const POSYANDU_OPTIONS_CACHE_KEY = 'anakPosyanduOptions'
+
+/* =================== FILTERS =================== */
 const q = ref('')                 // search bebas: NIK / nama anak / posyandu / nama ortu
 const filterPosyandu = ref('')    // label posyandu (exact)
 const filterJK = ref('')          // '', 'L', 'P'
@@ -31,6 +37,7 @@ const panjangTo = ref('')
 const lingkarFrom = ref('')       // cm
 const lingkarTo = ref('')
 
+/* =================== NORMALISASI =================== */
 // Normalisasi rows dari berbagai bentuk respons
 const rows = computed(() => {
   const u = anak.value
@@ -58,7 +65,57 @@ const boolOptions = [
   { label: 'Tidak', value: 'no' }
 ]
 
-// Helpers tampilan
+/* =================== LOAD DATA =================== */
+const fetchDataAnak = async () => {
+  loading.value = true
+  errorMsg.value = ''
+  try {
+    const res = await api.get('/anak', { headers: { Accept: 'application/json' } })
+    anak.value = Array.isArray(res.data) ? res.data
+      : Array.isArray(res.data?.data) ? res.data.data
+      : Array.isArray(res.data?.data?.data) ? res.data.data.data
+      : []
+
+    // Simpan data ke sessionStorage setelah berhasil mendapatkan data
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(anak.value))
+    dataFromSession.value = false
+  } catch (e) {
+    anak.value = []
+    errorMsg.value = e?.response?.data?.message ?? 'Gagal memuat data.'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  // Periksa apakah data ada di sessionStorage
+  const cachedData = sessionStorage.getItem(CACHE_KEY)
+  if (cachedData) {
+    try {
+      // Gunakan data dari sessionStorage jika ada
+      anak.value = JSON.parse(cachedData)
+      dataFromSession.value = true
+    } catch (error) {
+      console.error('Error parsing cached data:', error)
+      // Jika cache rusak, ambil data melalui API
+      fetchDataAnak()
+    }
+  } else {
+    // Jika data tidak ada, ambil data melalui API
+    fetchDataAnak()
+  }
+})
+
+const resetCache = () => {
+  // Hapus data yang disimpan di sessionStorage
+  sessionStorage.removeItem(CACHE_KEY)
+  sessionStorage.removeItem(POSYANDU_OPTIONS_CACHE_KEY)
+  
+  // Memuat ulang data setelah cache dihapus
+  fetchDataAnak()
+}
+
+/* =================== HELPERS TAMPILAN =================== */
 const toYesNo = (v) =>
   v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true' ? 'Ya' : 'Tidak'
 
@@ -70,7 +127,7 @@ const genderLabel = (jk) => {
   return jk.toUpperCase() === 'P' ? 'Perempuan' : jk.toUpperCase() === 'L' ? 'Laki-Laki' : jk
 }
 
-// Utils filter
+/* =================== UTILS FILTER =================== */
 const normalizeBool = (v) =>
   (v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true')
 
@@ -110,7 +167,7 @@ const inNumRange = (val, from, to) => {
   return true
 }
 
-// 🧮 filter utama
+/* =================== FILTER UTAMA =================== */
 const filteredRows = computed(() => {
   const keyword = q.value.trim().toLowerCase()
   const posy = filterPosyandu.value
@@ -172,27 +229,7 @@ const filteredRows = computed(() => {
   })
 })
 
-// Fetch data
-const fetchDataAnak = async () => {
-  loading.value = true
-  errorMsg.value = ''
-  await api
-    .get('/anak')
-    .then((response) => {
-      anak.value = response.data ?? []
-    })
-    .catch(() => {
-      anak.value = []
-      errorMsg.value = 'Gagal memuat data.'
-    })
-    .finally(() => {
-      loading.value = false
-    })
-}
-
-onMounted(fetchDataAnak)
-
-// Reset semua filter
+/* =================== RESET FILTER =================== */
 const resetFilter = () => {
   q.value = ''
   filterPosyandu.value = ''
@@ -212,7 +249,7 @@ const resetFilter = () => {
   lingkarTo.value = ''
 }
 
-// Hapus dengan SweetAlert2
+/* =================== DELETE DATA =================== */
 const deleteAnak = async (id) => {
   const { isConfirmed } = await Swal.fire({
     title: 'Hapus anak ini?',
@@ -240,7 +277,8 @@ const deleteAnak = async (id) => {
       timer: 1400,
       showConfirmButton: false,
     })
-    fetchDataAnak()
+    // Reset cache dan fetch ulang
+    resetCache()
   } catch (e) {
     await Swal.fire({
       title: 'Gagal',
@@ -288,7 +326,7 @@ const deleteAnak = async (id) => {
             <div class="row g-3 align-items-end">
               <!-- Search -->
               <div class="col-lg-4">
-                <label class="form-label mb-1">Cari (NIK / Nama Anak   / Nama Ortu)</label>
+                <label class="form-label mb-1">Cari (NIK / Nama Anak / Nama Ortu)</label>
                 <input
                   v-model="q"
                   type="text"
@@ -394,7 +432,7 @@ const deleteAnak = async (id) => {
 
               <!-- Reset -->
               <div class="col-lg-2 ms-auto d-grid">
-                <button class="btn btn-danger" @click="resetFilter">Reset</button>
+                <button class="btn btn-danger" @click="resetFilter; resetCache()">Reset</button>
               </div>
             </div>
           </div>
@@ -499,5 +537,4 @@ const deleteAnak = async (id) => {
 <style>
 /* Jarak antar tombol konfirmasi SweetAlert2 */
 .swal2-actions-gap { gap: 0.5rem; }
-
 </style>

@@ -9,6 +9,7 @@ import Swal from 'sweetalert2'
 const apk = ref([])
 const loading = ref(false)
 const errorMsg = ref('')
+const dataFromSession = ref(false) // Track if data comes from session
 
 /* =================== FILTERS =================== */
 const q = ref('')
@@ -24,6 +25,10 @@ const filterVita = ref('')
 const filterKelasIbu = ref('')
 const showAnomaliesOnly = ref(false) // Toggle untuk hanya tampilkan anomali
 
+/* =================== CACHE KEY =================== */
+const CACHE_KEY = 'anakPengukuranData'
+const ANOMALY_CACHE_KEY = 'anakPengukuranAnomaly'
+
 /* =================== LOAD DATA =================== */
 const fetchData = async () => {
   loading.value = true
@@ -34,6 +39,10 @@ const fetchData = async () => {
       : Array.isArray(res.data?.data) ? res.data.data
       : Array.isArray(res.data?.data?.data) ? res.data.data.data
       : []
+
+    // Simpan data ke sessionStorage setelah berhasil mendapatkan data
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(apk.value))
+    dataFromSession.value = false
   } catch (e) {
     apk.value = []
     errorMsg.value = e?.response?.data?.message ?? 'Gagal memuat data.'
@@ -42,7 +51,36 @@ const fetchData = async () => {
   }
 }
 
-onMounted(fetchData)
+onMounted(() => {
+  // Periksa apakah data ada di sessionStorage
+  const cachedData = sessionStorage.getItem(CACHE_KEY)
+  if (cachedData) {
+    try {
+      // Gunakan data dari sessionStorage jika ada
+      apk.value = JSON.parse(cachedData)
+      dataFromSession.value = true
+      // Tetap lakukan enrichDataWithAnomaly
+      enrichDataWithAnomaly()
+    } catch (error) {
+      console.error('Error parsing cached data:', error)
+      // Jika cache rusak, ambil dari API
+      fetchData().then(() => enrichDataWithAnomaly())
+    }
+  } else {
+    // Jika data tidak ada, ambil data melalui API
+    fetchData().then(() => enrichDataWithAnomaly())
+  }
+})
+
+const resetCache = () => {
+  // Hapus data yang disimpan di sessionStorage
+  sessionStorage.removeItem(CACHE_KEY)
+  sessionStorage.removeItem(ANOMALY_CACHE_KEY)
+  
+  // Memuat ulang data setelah cache dihapus
+  fetchData().then(() => enrichDataWithAnomaly())
+}
+
 
 /* =================== NORMALISASI =================== */
 const rows = computed(() => {
@@ -279,6 +317,18 @@ const detectAnomaly = async (item) => {
 const rowsWithAnomaly = ref([])
 
 const enrichDataWithAnomaly = async () => {
+  // Check if anomaly data exists in cache
+  const cachedAnomaly = sessionStorage.getItem(ANOMALY_CACHE_KEY)
+  if (cachedAnomaly && dataFromSession.value) {
+    try {
+      rowsWithAnomaly.value = JSON.parse(cachedAnomaly)
+      return
+    } catch (error) {
+      console.error('Error parsing anomaly cache:', error)
+    }
+  }
+
+  // Jika cache tidak ada atau rusak, lakukan deteksi ulang
   const enriched = []
   for (const item of rows.value) {
     const anomalyInfo = await detectAnomaly(item)
@@ -288,13 +338,10 @@ const enrichDataWithAnomaly = async () => {
     })
   }
   rowsWithAnomaly.value = enriched
+  
+  // Simpan hasil ke sessionStorage
+  sessionStorage.setItem(ANOMALY_CACHE_KEY, JSON.stringify(enriched))
 }
-
-// Panggil setelah data dimuat
-onMounted(async () => {
-  await fetchData()
-  await enrichDataWithAnomaly()
-})
 
 /* =================== FILTERING =================== */
 const filteredRows = computed(() => {
@@ -532,10 +579,10 @@ const showDataComparison = async (item) => {
     `,
     width: '900px',
     showCancelButton: true,
-    confirmButtonText: '<i class="fas fa-save me-2"></i>Simpan Pilihan',
+    confirmButtonText: '<i class="fas fa-save me-2 "></i>Simpan Pilihan',
     cancelButtonText: '<i class="fas fa-times me-2"></i>Batal',
     customClass: {
-      confirmButton: 'btn btn-primary',
+      confirmButton: 'btn btn-primary me-2',
       cancelButton: 'btn btn-secondary'
     },
     buttonsStyling: false,
@@ -925,7 +972,7 @@ const resetFilter = () => {
             </div>
 
             <div class="col-xl-4 ms-auto">
-              <button class="btn btn-danger w-100" @click="resetFilter">Reset Semua Filter</button>
+              <button class="btn btn-danger w-100" @click="resetFilter; resetCache()">Reset Semua Filter</button>
             </div>
           </div>
         </div>
