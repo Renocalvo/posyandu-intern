@@ -185,7 +185,8 @@ The Website Pencatatan Posyandu Balita is a robust solution for managing and tra
 
 ## Example Code: Backend (Laravel)
 ### Routes
-``use App\Http\Controllers\ChildController;
+```
+use App\Http\Controllers\ChildController;
 
 Route::middleware(['auth'])->group(function() {
     Route::resource('children', ChildController::class);
@@ -226,10 +227,10 @@ class ChildController extends Controller
 
         return redirect()->route('children.index')->with('success', 'Child data updated successfully');
     }
-}``
+}```
 
 ### Frontend (Vue.js)
-``
+```
 <template>
     <div class="add-child">
         <form @submit.prevent="addChild">
@@ -278,4 +279,4 @@ export default {
     }
 };
 </script>
-``
+```
