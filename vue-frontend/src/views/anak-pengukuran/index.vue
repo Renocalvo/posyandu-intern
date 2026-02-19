@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { posyanduLabelFromRow as posyanduLabel } from '../../utils/labels'
 import api from '../../api'
@@ -9,7 +9,19 @@ import Swal from 'sweetalert2'
 const apk = ref([])
 const loading = ref(false)
 const errorMsg = ref('')
-const dataFromSession = ref(false) // Track if data comes from session
+const dataFromSession = ref(false)
+
+/* =================== PAGINATION & CACHE CONFIG =================== */
+const PAGE_SIZE = 20
+const currentPage = ref(1)
+const totalItems = ref(0)
+const loadedPages = ref(new Set())
+const CACHE_EXPIRY = 30 * 60 * 1000
+
+/* =================== LOG CACHE (semua log, di-fetch sekali) =================== */
+const allLogsMap = ref({}) // { [nik]: [...logs] }
+const logsLoaded = ref(false)
+const logsLoading = ref(false)
 
 /* =================== FILTERS =================== */
 const q = ref('')
@@ -23,64 +35,177 @@ const lkFrom = ref(''); const lkTo = ref('')
 const filterAsiMonths = ref([])
 const filterVita = ref('')
 const filterKelasIbu = ref('')
-const showAnomaliesOnly = ref(false) // Toggle untuk hanya tampilkan anomali
+const showAnomaliesOnly = ref(false)
 
-/* =================== CACHE KEY =================== */
-const CACHE_KEY = 'anakPengukuranData'
-const ANOMALY_CACHE_KEY = 'anakPengukuranAnomaly'
+/* =================== CACHE MANAGEMENT =================== */
+const getCacheKey = (key) => `anakPengukuran_${key}`
+
+const getFromCache = (key) => {
+  try {
+    const cached = sessionStorage.getItem(getCacheKey(key))
+    if (!cached) return null
+    const { data, timestamp } = JSON.parse(cached)
+    if (Date.now() - timestamp > CACHE_EXPIRY) {
+      sessionStorage.removeItem(getCacheKey(key))
+      return null
+    }
+    return data
+  } catch (e) {
+    return null
+  }
+}
+
+const saveToCache = (key, data) => {
+  try {
+    sessionStorage.setItem(getCacheKey(key), JSON.stringify({ data, timestamp: Date.now() }))
+  } catch (e) {}
+}
+
+const clearCache = () => {
+  sessionStorage.removeItem(getCacheKey('data'))
+  sessionStorage.removeItem(getCacheKey('meta'))
+  sessionStorage.removeItem(getCacheKey('logs'))
+  loadedPages.value.clear()
+  apk.value = []
+  currentPage.value = 1
+  dataFromSession.value = false
+  allLogsMap.value = {}
+  logsLoaded.value = false
+  rowsWithAnomaly.value = []
+}
+
+/* =================== FETCH SEMUA LOG SEKALIGUS =================== */
+const fetchAllLogs = async () => {
+  // Cek cache logs dulu
+  const cachedLogs = getFromCache('logs')
+  if (cachedLogs) {
+    allLogsMap.value = cachedLogs
+    logsLoaded.value = true
+    return
+  }
+
+  logsLoading.value = true
+  try {
+    const res = await api.get('/log-pengukuran', {
+      headers: { Accept: 'application/json' }
+    })
+
+    const list = Array.isArray(res.data)
+      ? res.data
+      : Array.isArray(res.data?.data)
+        ? res.data.data
+        : []
+
+    // Group by NIK
+    const map = {}
+    for (const log of list) {
+      const nik = log.nik_log
+      if (!nik) continue
+      if (!map[nik]) map[nik] = []
+      map[nik].push(log)
+    }
+
+    // Sort tiap NIK by tanggal_ukur_lama desc
+    for (const nik in map) {
+      map[nik].sort((a, b) =>
+        new Date(b.tanggal_ukur_lama || 0) - new Date(a.tanggal_ukur_lama || 0)
+      )
+    }
+
+    allLogsMap.value = map
+    logsLoaded.value = true
+    saveToCache('logs', map)
+  } catch (e) {
+    console.error('Gagal fetch logs:', e)
+  } finally {
+    logsLoading.value = false
+  }
+}
 
 /* =================== LOAD DATA =================== */
-const fetchData = async () => {
+const fetchData = async (page = 1) => {
+  if (loadedPages.value.has(page)) return
+
   loading.value = true
   errorMsg.value = ''
-  try {
-    const res = await api.get('/anak-pengukuran', { headers: { Accept: 'application/json' } })
-    apk.value = Array.isArray(res.data) ? res.data
-      : Array.isArray(res.data?.data) ? res.data.data
-      : Array.isArray(res.data?.data?.data) ? res.data.data.data
-      : []
 
-    // Simpan data ke sessionStorage setelah berhasil mendapatkan data
-    sessionStorage.setItem(CACHE_KEY, JSON.stringify(apk.value))
+  try {
+    const response = await api.get('/anak-pengukuran', {
+      params: { page, per_page: PAGE_SIZE },
+      headers: { Accept: 'application/json' }
+    })
+
+    let items = []
+    let meta = {}
+
+    if (response.data?.data) {
+      items = Array.isArray(response.data.data) ? response.data.data : []
+      meta = response.data.meta || {
+        total: response.data.total || 0,
+        per_page: PAGE_SIZE,
+        current_page: page,
+        last_page: Math.ceil((response.data.total || 0) / PAGE_SIZE)
+      }
+    } else if (Array.isArray(response.data)) {
+      items = response.data
+    }
+
+    const startIndex = (page - 1) * PAGE_SIZE
+    const newApk = [...apk.value]
+    items.forEach((item, idx) => { newApk[startIndex + idx] = item })
+
+    apk.value = newApk
+    totalItems.value = meta.total || items.length
+    loadedPages.value.add(page)
+
+    saveToCache('data', apk.value)
+    saveToCache('meta', meta)
     dataFromSession.value = false
+
   } catch (e) {
-    apk.value = []
     errorMsg.value = e?.response?.data?.message ?? 'Gagal memuat data.'
+    apk.value = []
   } finally {
     loading.value = false
   }
 }
 
-onMounted(() => {
-  // Periksa apakah data ada di sessionStorage
-  const cachedData = sessionStorage.getItem(CACHE_KEY)
-  if (cachedData) {
-    try {
-      // Gunakan data dari sessionStorage jika ada
-      apk.value = JSON.parse(cachedData)
-      dataFromSession.value = true
-      // Tetap lakukan enrichDataWithAnomaly
-      enrichDataWithAnomaly()
-    } catch (error) {
-      console.error('Error parsing cached data:', error)
-      // Jika cache rusak, ambil dari API
-      fetchData().then(() => enrichDataWithAnomaly())
-    }
-  } else {
-    // Jika data tidak ada, ambil data melalui API
-    fetchData().then(() => enrichDataWithAnomaly())
+onMounted(async () => {
+  const cachedData = getFromCache('data')
+  const cachedMeta = getFromCache('meta')
+
+  if (cachedData && cachedMeta) {
+    apk.value = cachedData
+    totalItems.value = cachedMeta.total || cachedData.length
+    loadedPages.value.add(1)
+    dataFromSession.value = true
   }
+
+  // Fetch data pengukuran & semua log secara paralel
+  await Promise.all([
+    loadedPages.value.has(1) ? Promise.resolve() : fetchData(1),
+    fetchAllLogs()
+  ])
+
+  enrichDataWithAnomaly()
 })
 
 const resetCache = () => {
-  // Hapus data yang disimpan di sessionStorage
-  sessionStorage.removeItem(CACHE_KEY)
-  sessionStorage.removeItem(ANOMALY_CACHE_KEY)
-  
-  // Memuat ulang data setelah cache dihapus
-  fetchData().then(() => enrichDataWithAnomaly())
+  clearCache()
+  Promise.all([fetchData(1), fetchAllLogs()]).then(() => enrichDataWithAnomaly())
 }
 
+/* =================== PAGINATION =================== */
+const goToPage = async (page) => {
+  if (page < 1 || page > totalPages.value) return
+  currentPage.value = page
+  if (!loadedPages.value.has(page)) {
+    await fetchData(page)
+  }
+  enrichDataWithAnomaly()
+}
+
+const totalPages = computed(() => Math.ceil(totalItems.value / PAGE_SIZE))
 
 /* =================== NORMALISASI =================== */
 const rows = computed(() => {
@@ -89,6 +214,11 @@ const rows = computed(() => {
   if (Array.isArray(u?.data)) return u.data
   if (Array.isArray(u?.data?.data)) return u.data.data
   return []
+})
+
+const pageData = computed(() => {
+  const start = (currentPage.value - 1) * PAGE_SIZE
+  return rows.value.slice(start, start + PAGE_SIZE)
 })
 
 const posyanduOptions = computed(() => {
@@ -111,7 +241,7 @@ const fmtISO = (v) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
 
   let m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/)
-  if (m) { 
+  if (m) {
     let yy = +m[3]
     if (yy < 100) yy += 2000
     return `${yy}-${String(+m[2]).padStart(2,'0')}-${String(+m[1]).padStart(2,'0')}`
@@ -149,23 +279,17 @@ function inDateRange(value, from, to) {
 
 const safe = (v) => (v ?? v === 0 ? v : '')
 const fmtBool = (v) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true'
-
-const parseNum = (v) => { 
-  const n = parseFloat(v)
-  return Number.isFinite(n) ? n : null 
-}
+const parseNum = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
 const inNumRange = (val, from, to) => {
   const n = parseNum(val)
   if (n === null) return false
-  const f = parseNum(from)
-  const t = parseNum(to)
+  const f = parseNum(from); const t = parseNum(to)
   if (f !== null && n < f) return false
   if (t !== null && n > t) return false
   return true
 }
 
-/* === ASI 0..6 → list bulan yang true === */
 function getAsi(item, i) {
   const k1 = `asi_bulan_${i}`
   const k2 = item?.asi ? item.asi[`bulan_${i}`] : undefined
@@ -182,195 +306,99 @@ function asiTagList(item) {
   return out
 }
 
-/* === Vitamin A === */
-function getVita(item) {
-  return item?.vita ?? item?.vit_a ?? item?.vita_a ?? ''
-}
-
+function getVita(item) { return item?.vita ?? item?.vit_a ?? item?.vita_a ?? '' }
 const vitaColor = (v) => {
   const s = String(v ?? '').trim().toLowerCase()
   if (s === 'biru') return 'BIRU'
   if (s === 'merah') return 'MERAH'
   return ''
 }
-
-/* === Kelas Ibu === */
 const getKelasIbu = (item) => item?.kelas_ibu_balita ?? item?.kelasIbuBalita
 
-/* =================== ANOMALY DETECTION =================== */
-const detectAnomaly = async (item) => {
+/* =================== ANOMALY DETECTION - PAKAI allLogsMap =================== */
+const rowsWithAnomaly = ref([])
+
+const detectAnomalyFromMap = (item) => {
   const nik = item?.anak?.nik
   if (!nik) return { hasAnomaly: false, type: [], details: {} }
 
-  try {
-    // Ambil data log pengukuran
-    const res = await api.get(`/log-pengukuran/nik/${nik}`, { 
-      headers: { Accept: 'application/json' } 
-    })
-    
-    const logData = Array.isArray(res.data) ? res.data
-      : Array.isArray(res.data?.data) ? res.data.data
-      : []
+  const logData = allLogsMap.value[nik]
+  if (!logData || logData.length === 0) return { hasAnomaly: false, type: [], details: {} }
 
-    if (logData.length === 0) {
-      return { hasAnomaly: false, type: [], details: {} }
-    }
+  const prevData = logData[0] // sudah di-sort desc, jadi [0] = terbaru
+  const currData = item
 
-    // Urutkan berdasarkan tanggal (terbaru dulu)
-    logData.sort((a, b) => {
-      const dateA = new Date(a.tanggal_ukur_lama || 0).getTime()
-      const dateB = new Date(b.tanggal_ukur_lama || 0).getTime()
-      return dateB - dateA
-    })
-
-    const prevData = logData[0] // Data terakhir sebelum update
-    const currData = item // Data saat ini
-
-    const anomalies = []
-    const details = {
-      prev: {
-        tinggi: prevData.tinggi_lama,
-        berat: prevData.berat_lama,
-        lila: prevData.lila_lama,
-        lingkar_kepala: prevData.lingkar_kepala_lama,
-        tanggal_ukur: prevData.tanggal_ukur_lama
-      },
-      curr: {
-        tinggi: currData.tinggi,
-        berat: currData.berat,
-        lila: currData.lila,
-        lingkar_kepala: currData.lingkar_kepala,
-        tanggal_ukur: currData.tanggal_ukur
-      },
-      diff: {}
-    }
-
-    // Cek anomali tinggi badan
-    if (currData.tinggi && prevData.tinggi_lama) {
-      const tinggiDiff = currData.tinggi - prevData.tinggi_lama
-      details.diff.tinggi = tinggiDiff
-
-      // Tinggi berkurang (tidak normal)
-      if (tinggiDiff < -0.5) {
-        anomalies.push('tinggi_menurun')
-      }
-      // Tinggi bertambah terlalu banyak (> 5cm dalam satu pengukuran)
-      else if (tinggiDiff > 5) {
-        anomalies.push('tinggi_melonjak')
-      }
-    }
-
-    // Cek anomali berat badan
-    if (currData.berat && prevData.berat_lama) {
-      const beratDiff = currData.berat - prevData.berat_lama
-      details.diff.berat = beratDiff
-
-      // Berat turun drastis (> 1kg)
-      if (beratDiff < -1) {
-        anomalies.push('berat_turun_drastis')
-      }
-      // Berat naik drastis (> 3kg)
-      else if (beratDiff > 3) {
-        anomalies.push('berat_naik_drastis')
-      }
-    }
-
-    // Cek anomali LILA
-    if (currData.lila && prevData.lila_lama) {
-      const lilaDiff = currData.lila - prevData.lila_lama
-      details.diff.lila = lilaDiff
-
-      // LILA berkurang (indikasi malnutrisi)
-      if (lilaDiff < -1) {
-        anomalies.push('lila_menurun')
-      }
-    }
-
-    // Cek anomali lingkar kepala
-    if (currData.lingkar_kepala && prevData.lingkar_kepala_lama) {
-      const lkDiff = currData.lingkar_kepala - prevData.lingkar_kepala_lama
-      details.diff.lingkar_kepala = lkDiff
-
-      // Lingkar kepala berkurang
-      if (lkDiff < -0.5) {
-        anomalies.push('lk_menurun')
-      }
-      // Lingkar kepala naik terlalu cepat
-      else if (lkDiff > 3) {
-        anomalies.push('lk_melonjak')
-      }
-    }
-
-    return {
-      hasAnomaly: anomalies.length > 0,
-      type: anomalies,
-      details: details
-    }
-
-  } catch (error) {
-    console.error('Error detecting anomaly:', error)
-    return { hasAnomaly: false, type: [], details: {} }
+  const anomalies = []
+  const details = {
+    prev: {
+      tinggi: prevData.tinggi_lama,
+      berat: prevData.berat_lama,
+      lila: prevData.lila_lama,
+      lingkar_kepala: prevData.lingkar_kepala_lama,
+      tanggal_ukur: prevData.tanggal_ukur_lama
+    },
+    curr: {
+      tinggi: currData.tinggi,
+      berat: currData.berat,
+      lila: currData.lila,
+      lingkar_kepala: currData.lingkar_kepala,
+      tanggal_ukur: currData.tanggal_ukur
+    },
+    diff: {}
   }
+
+  if (currData.tinggi && prevData.tinggi_lama) {
+    const d = currData.tinggi - prevData.tinggi_lama
+    details.diff.tinggi = d
+    if (d < -0.5) anomalies.push('tinggi_menurun')
+    else if (d > 5) anomalies.push('tinggi_melonjak')
+  }
+  if (currData.berat && prevData.berat_lama) {
+    const d = currData.berat - prevData.berat_lama
+    details.diff.berat = d
+    if (d < -1) anomalies.push('berat_turun_drastis')
+    else if (d > 3) anomalies.push('berat_naik_drastis')
+  }
+  if (currData.lila && prevData.lila_lama) {
+    const d = currData.lila - prevData.lila_lama
+    details.diff.lila = d
+    if (d < -1) anomalies.push('lila_menurun')
+  }
+  if (currData.lingkar_kepala && prevData.lingkar_kepala_lama) {
+    const d = currData.lingkar_kepala - prevData.lingkar_kepala_lama
+    details.diff.lingkar_kepala = d
+    if (d < -0.5) anomalies.push('lk_menurun')
+    else if (d > 3) anomalies.push('lk_melonjak')
+  }
+
+  return { hasAnomaly: anomalies.length > 0, type: anomalies, details }
 }
 
-/* =================== ENHANCED ROWS WITH ANOMALY =================== */
-const rowsWithAnomaly = ref([])
+const enrichDataWithAnomaly = () => {
+  if (!logsLoaded.value) return // tunggu logs selesai di-fetch
 
-const enrichDataWithAnomaly = async () => {
-  // Check if anomaly data exists in cache
-  const cachedAnomaly = sessionStorage.getItem(ANOMALY_CACHE_KEY)
-  if (cachedAnomaly && dataFromSession.value) {
-    try {
-      rowsWithAnomaly.value = JSON.parse(cachedAnomaly)
-      return
-    } catch (error) {
-      console.error('Error parsing anomaly cache:', error)
-    }
-  }
-
-  // Jika cache tidak ada atau rusak, lakukan deteksi ulang
-  const enriched = []
-  for (const item of rows.value) {
-    const anomalyInfo = await detectAnomaly(item)
-    enriched.push({
-      ...item,
-      anomalyInfo
-    })
-  }
-  rowsWithAnomaly.value = enriched
-  
-  // Simpan hasil ke sessionStorage
-  sessionStorage.setItem(ANOMALY_CACHE_KEY, JSON.stringify(enriched))
+  rowsWithAnomaly.value = pageData.value.map(item => ({
+    ...item,
+    anomalyInfo: detectAnomalyFromMap(item)
+  }))
 }
 
 /* =================== FILTERING =================== */
 const filteredRows = computed(() => {
   const keyword = q.value.trim().toLowerCase()
   const selAsi = filterAsiMonths.value
-  const selVita = filterVita.value
-  const selKelas = filterKelasIbu.value
 
-  let filtered = rowsWithAnomaly.value.filter(item => {
+  return rowsWithAnomaly.value.filter(item => {
     const label = posyanduLabel(item) || ''
 
-    // Filter anomali only
-    if (showAnomaliesOnly.value && !item.anomalyInfo?.hasAnomaly) {
-      return false
-    }
-
-    // Posyandu
+    if (showAnomaliesOnly.value && !item.anomalyInfo?.hasAnomaly) return false
     if (filterPosyandu.value && label !== filterPosyandu.value) return false
-
-    // Tanggal Ukur
     if ((tglFrom.value || tglTo.value) && !inDateRange(item?.tanggal_ukur, tglFrom.value, tglTo.value)) return false
-
-    // Rentang numerik
     if ((beratFrom.value || beratTo.value) && !inNumRange(item?.berat, beratFrom.value, beratTo.value)) return false
     if ((tinggiFrom.value || tinggiTo.value) && !inNumRange(item?.tinggi, tinggiFrom.value, tinggiTo.value)) return false
     if ((lilaFrom.value || lilaTo.value) && !inNumRange(item?.lila, lilaFrom.value, lilaTo.value)) return false
     if ((lkFrom.value || lkTo.value) && !inNumRange(item?.lingkar_kepala, lkFrom.value, lkTo.value)) return false
 
-    // ASI
     if (Array.isArray(selAsi) && selAsi.length > 0) {
       const anyOn = selAsi.some(mIdx => {
         const raw = getAsi(item, mIdx)
@@ -379,22 +407,18 @@ const filteredRows = computed(() => {
       if (!anyOn) return false
     }
 
-    // Vitamin A
-    if (selVita) {
+    if (filterVita.value) {
       const color = vitaColor(getVita(item))
-      if (selVita === 'KOSONG') {
-        const isTruthy = fmtBool(getVita(item))
-        if (isTruthy || color !== '') return false
+      if (filterVita.value === 'KOSONG') {
+        if (fmtBool(getVita(item)) || color !== '') return false
       } else {
-        if (color !== selVita) return false
+        if (color !== filterVita.value) return false
       }
     }
 
-    // Kelas Ibu
-    if (selKelas === 'YA' && !fmtBool(getKelasIbu(item))) return false
-    if (selKelas === 'TIDAK' && fmtBool(getKelasIbu(item))) return false
+    if (filterKelasIbu.value === 'YA' && !fmtBool(getKelasIbu(item))) return false
+    if (filterKelasIbu.value === 'TIDAK' && fmtBool(getKelasIbu(item))) return false
 
-    // Keyword
     if (keyword) {
       const nikStr = String(item?.anak?.nik ?? '').toLowerCase()
       const namaStr = String(item?.anak?.nama_anak ?? '').toLowerCase()
@@ -404,71 +428,54 @@ const filteredRows = computed(() => {
 
     return true
   })
-
-  return filtered
 })
 
-const anomalyCount = computed(() => {
-  return rowsWithAnomaly.value.filter(item => item.anomalyInfo?.hasAnomaly).length
-})
+const anomalyCount = computed(() =>
+  rowsWithAnomaly.value.filter(item => item.anomalyInfo?.hasAnomaly).length
+)
 
-/* =================== ANOMALY INDICATOR =================== */
 const getAnomalyBadgeClass = (types) => {
-  if (!types || types.length === 0) return ''
-  
+  if (!types?.length) return ''
   const criticalTypes = ['tinggi_menurun', 'berat_turun_drastis', 'lila_menurun', 'lk_menurun']
-  const hasCritical = types.some(t => criticalTypes.includes(t))
-  
-  return hasCritical ? 'bg-danger' : 'bg-warning'
+  return types.some(t => criticalTypes.includes(t)) ? 'bg-danger' : 'bg-warning'
 }
 
-const getAnomalyLabel = (type) => {
-  const labels = {
-    'tinggi_menurun': 'Tinggi Menurun',
-    'tinggi_melonjak': 'Tinggi Naik Drastis',
-    'berat_turun_drastis': 'Berat Turun Drastis',
-    'berat_naik_drastis': 'Berat Naik Drastis',
-    'lila_menurun': 'LILA Menurun',
-    'lk_menurun': 'LK Menurun',
-    'lk_melonjak': 'LK Naik Drastis'
-  }
-  return labels[type] || type
-}
+const getAnomalyLabel = (type) => ({
+  'tinggi_menurun': 'Tinggi Menurun',
+  'tinggi_melonjak': 'Tinggi Naik Drastis',
+  'berat_turun_drastis': 'Berat Turun Drastis',
+  'berat_naik_drastis': 'Berat Naik Drastis',
+  'lila_menurun': 'LILA Menurun',
+  'lk_menurun': 'LK Menurun',
+  'lk_melonjak': 'LK Naik Drastis'
+})[type] || type
 
 /* =================== SHOW DATA COMPARISON =================== */
 const showDataComparison = async (item) => {
-  if (!item.anomalyInfo || !item.anomalyInfo.hasAnomaly) {
-    await Swal.fire({
-      title: 'Tidak Ada Anomali',
-      text: 'Data pengukuran ini tidak memiliki anomali.',
-      icon: 'info',
-      confirmButtonText: 'Tutup'
-    })
+  if (!item.anomalyInfo?.hasAnomaly) {
+    await Swal.fire({ title: 'Tidak Ada Anomali', text: 'Data pengukuran ini tidak memiliki anomali.', icon: 'info', confirmButtonText: 'Tutup' })
     return
   }
 
   const { details, type } = item.anomalyInfo
   const { prev, curr, diff } = details
 
-  const anomalyBadges = type.map(t => 
+  const anomalyBadges = type.map(t =>
     `<span class="badge ${getAnomalyBadgeClass([t])} me-1">${getAnomalyLabel(t)}</span>`
   ).join(' ')
 
   const formatDiff = (val) => {
-    if (val === null || val === undefined) return '-'
+    if (val == null) return '-'
     const num = parseFloat(val)
     if (!Number.isFinite(num)) return '-'
-    const sign = num >= 0 ? '+' : ''
-    return `${sign}${num.toFixed(2)}`
+    return `${num >= 0 ? '+' : ''}${num.toFixed(2)}`
   }
 
   const diffColor = (val) => {
-    if (val === null || val === undefined) return ''
+    if (val == null) return ''
     const num = parseFloat(val)
     if (!Number.isFinite(num)) return ''
-    if (num < 0) return 'text-danger'
-    if (num > 0) return 'text-success'
-    return 'text-muted'
+    return num < 0 ? 'text-danger' : num > 0 ? 'text-success' : 'text-muted'
   }
 
   const result = await Swal.fire({
@@ -479,117 +486,54 @@ const showDataComparison = async (item) => {
           <div><strong>Nama Anak:</strong> ${item?.anak?.nama_anak || '-'}</div>
           <div><strong>NIK:</strong> <code>${item?.anak?.nik || '-'}</code></div>
         </div>
-
         <div class="alert alert-warning mb-3">
-          <strong>Anomali Terdeteksi:</strong><br>
-          ${anomalyBadges}
+          <strong>Anomali Terdeteksi:</strong><br>${anomalyBadges}
         </div>
-
         <div class="row">
-          <!-- Data Sebelumnya -->
           <div class="col-md-6">
             <div class="card">
-              <div class="card-header bg-secondary text-white">
-                <strong>Data Sebelumnya</strong>
-              </div>
+              <div class="card-header bg-secondary text-white"><strong>Data Sebelumnya</strong></div>
               <div class="card-body">
                 <table class="table table-sm mb-0">
-                  <tr>
-                    <td>Tanggal Ukur:</td>
-                    <td><strong>${toDisplayDate(prev.tanggal_ukur)}</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Tinggi Badan:</td>
-                    <td><strong>${prev.tinggi || '-'} cm</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Berat Badan:</td>
-                    <td><strong>${prev.berat || '-'} kg</strong></td>
-                  </tr>
-                  <tr>
-                    <td>LILA:</td>
-                    <td><strong>${prev.lila || '-'} cm</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Lingkar Kepala:</td>
-                    <td><strong>${prev.lingkar_kepala || '-'} cm</strong></td>
-                  </tr>
+                  <tr><td>Tanggal Ukur:</td><td><strong>${toDisplayDate(prev.tanggal_ukur)}</strong></td></tr>
+                  <tr><td>Tinggi Badan:</td><td><strong>${prev.tinggi || '-'} cm</strong></td></tr>
+                  <tr><td>Berat Badan:</td><td><strong>${prev.berat || '-'} kg</strong></td></tr>
+                  <tr><td>LILA:</td><td><strong>${prev.lila || '-'} cm</strong></td></tr>
+                  <tr><td>Lingkar Kepala:</td><td><strong>${prev.lingkar_kepala || '-'} cm</strong></td></tr>
                 </table>
               </div>
             </div>
           </div>
-
-          <!-- Data Terbaru -->
           <div class="col-md-6">
             <div class="card">
-              <div class="card-header bg-primary text-white">
-                <strong>Data Terbaru</strong>
-              </div>
+              <div class="card-header bg-primary text-white"><strong>Data Terbaru</strong></div>
               <div class="card-body">
                 <table class="table table-sm mb-0">
-                  <tr>
-                    <td>Tanggal Ukur:</td>
-                    <td><strong>${toDisplayDate(curr.tanggal_ukur)}</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Tinggi Badan:</td>
-                    <td>
-                      <strong>${curr.tinggi || '-'} cm</strong>
-                      <span class="${diffColor(diff.tinggi)} ms-2">${formatDiff(diff.tinggi)}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td>Berat Badan:</td>
-                    <td>
-                      <strong>${curr.berat || '-'} kg</strong>
-                      <span class="${diffColor(diff.berat)} ms-2">${formatDiff(diff.berat)}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td>LILA:</td>
-                    <td>
-                      <strong>${curr.lila || '-'} cm</strong>
-                      <span class="${diffColor(diff.lila)} ms-2">${formatDiff(diff.lila)}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td>Lingkar Kepala:</td>
-                    <td>
-                      <strong>${curr.lingkar_kepala || '-'} cm</strong>
-                      <span class="${diffColor(diff.lingkar_kepala)} ms-2">${formatDiff(diff.lingkar_kepala)}</span>
-                    </td>
-                  </tr>
+                  <tr><td>Tanggal Ukur:</td><td><strong>${toDisplayDate(curr.tanggal_ukur)}</strong></td></tr>
+                  <tr><td>Tinggi Badan:</td><td><strong>${curr.tinggi || '-'} cm</strong> <span class="${diffColor(diff.tinggi)} ms-2">${formatDiff(diff.tinggi)}</span></td></tr>
+                  <tr><td>Berat Badan:</td><td><strong>${curr.berat || '-'} kg</strong> <span class="${diffColor(diff.berat)} ms-2">${formatDiff(diff.berat)}</span></td></tr>
+                  <tr><td>LILA:</td><td><strong>${curr.lila || '-'} cm</strong> <span class="${diffColor(diff.lila)} ms-2">${formatDiff(diff.lila)}</span></td></tr>
+                  <tr><td>Lingkar Kepala:</td><td><strong>${curr.lingkar_kepala || '-'} cm</strong> <span class="${diffColor(diff.lingkar_kepala)} ms-2">${formatDiff(diff.lingkar_kepala)}</span></td></tr>
                 </table>
               </div>
             </div>
           </div>
         </div>
-
         <div class="mt-4">
           <label class="form-label"><strong>Pilih data yang akan digunakan:</strong></label>
           <select id="data-pilihan" class="form-select">
             <option value="curr" selected>Gunakan Data Terbaru</option>
             <option value="prev">Gunakan Data Sebelumnya (Rollback)</option>
           </select>
-          <div class="form-text">
-            Pilih "Data Terbaru" jika yakin data baru benar, atau "Data Sebelumnya" untuk rollback ke data lama.
-          </div>
         </div>
-      </div>
-    `,
+      </div>`,
     width: '900px',
     showCancelButton: true,
-    confirmButtonText: '<i class="fas fa-save me-2 "></i>Simpan Pilihan',
+    confirmButtonText: '<i class="fas fa-save me-2"></i>Simpan Pilihan',
     cancelButtonText: '<i class="fas fa-times me-2"></i>Batal',
-    customClass: {
-      confirmButton: 'btn btn-primary mx-2',
-      cancelButton: 'btn btn-secondary'
-    },
+    customClass: { confirmButton: 'btn btn-primary mx-2', cancelButton: 'btn btn-secondary' },
     buttonsStyling: false,
-    preConfirm: () => {
-      const selectedData = document.getElementById('data-pilihan').value
-      return selectedData
-    }
+    preConfirm: () => document.getElementById('data-pilihan').value
   })
 
   if (result.isConfirmed) {
@@ -597,11 +541,10 @@ const showDataComparison = async (item) => {
   }
 }
 
-/* =================== UPDATE DATA SETELAH COMPARE =================== */
+/* =================== UPDATE DATA =================== */
 const updateDataSelection = async (item, selectedData, details) => {
   try {
     const { prev, curr } = details
-    
     const updatedData = {
       anak_id: item.anak_id || item.anak?.id,
       tanggal_ukur: selectedData === 'prev' ? prev.tanggal_ukur : curr.tanggal_ukur,
@@ -612,38 +555,32 @@ const updateDataSelection = async (item, selectedData, details) => {
       posyandu_id: item.posyandu_id,
       cara_ukur: item.cara_ukur,
       vit_a: item.vit_a || item.vita || null,
-      asi_bulan_0: getAsi(item, 0),
-      asi_bulan_1: getAsi(item, 1),
-      asi_bulan_2: getAsi(item, 2),
-      asi_bulan_3: getAsi(item, 3),
-      asi_bulan_4: getAsi(item, 4),
-      asi_bulan_5: getAsi(item, 5),
+      asi_bulan_0: getAsi(item, 0), asi_bulan_1: getAsi(item, 1),
+      asi_bulan_2: getAsi(item, 2), asi_bulan_3: getAsi(item, 3),
+      asi_bulan_4: getAsi(item, 4), asi_bulan_5: getAsi(item, 5),
       asi_bulan_6: getAsi(item, 6),
       kelas_ibu_balita: getKelasIbu(item)
     }
 
-    // Update menggunakan endpoint PATCH
-    await api.patch(`/anak-pengukuran/${item.id}`, updatedData, {
-      headers: { Accept: 'application/json' }
-    })
+    await api.patch(`/anak-pengukuran/${item.id}`, updatedData, { headers: { Accept: 'application/json' } })
 
     await Swal.fire({
       title: 'Berhasil!',
-      html: selectedData === 'prev' 
-        ? 'Data berhasil di-rollback ke pengukuran sebelumnya.<br>Data lama (yang di-rollback) disimpan ke log.'
-        : 'Data terbaru dikonfirmasi dan disimpan.<br>Data sebelumnya tetap ada di log.',
+      html: selectedData === 'prev'
+        ? 'Data berhasil di-rollback ke pengukuran sebelumnya.'
+        : 'Data terbaru dikonfirmasi dan disimpan.',
       icon: 'success',
       confirmButtonText: 'OK'
     })
 
-    // Refresh data
-    await fetchData()
-    await enrichDataWithAnomaly()
+    clearCache()
+    await Promise.all([fetchData(1), fetchAllLogs()])
+    enrichDataWithAnomaly()
 
   } catch (error) {
     await Swal.fire({
       title: 'Gagal Memperbarui',
-      text: error?.response?.data?.message ?? 'Terjadi kesalahan saat memperbarui data.',
+      text: error?.response?.data?.message ?? 'Terjadi kesalahan.',
       icon: 'error',
       confirmButtonText: 'Tutup'
     })
@@ -652,52 +589,51 @@ const updateDataSelection = async (item, selectedData, details) => {
 
 /* =================== VIEW RIWAYAT =================== */
 const viewRiwayat = async (nik, nama = '') => {
+  // Gunakan allLogsMap jika sudah loaded, tidak perlu fetch lagi
+  const useCached = logsLoaded.value && allLogsMap.value[nik]
+
   Swal.fire({
     title: 'Riwayat Pengukuran',
     html: `<div class="mb-2"><b>${nama || '-'}</b></div><div class="small text-muted">NIK: <code>${nik || '-'}</code></div><div class="mt-2">Memuat data riwayat…</div>`,
     allowOutsideClick: false,
-    allowEscapeKey: false,
     showConfirmButton: false,
     didOpen: () => Swal.showLoading(),
     width: '1000px',
-    customClass: { popup: 'swal-riwayat', actions: 'swal2-actions-gap' },
     buttonsStyling: false,
   })
 
   const asiBadges = (r) => {
     const flags = []
     for (let i = 0; i <= 6; i++) {
-      const k = `asi_bulan_${i}_lama`
-      const v = r?.[k]
-      const on = v === true || v === 1 || v === '1' || String(v).toLowerCase?.() === 'true'
-      if (on) flags.push(i)
+      const v = r?.[`asi_bulan_${i}_lama`]
+      if (v === true || v === 1 || v === '1' || String(v).toLowerCase?.() === 'true') flags.push(i)
     }
-    if (!flags.length) return '—'
-    return flags.map(b => `<span class="badge bg-success me-1 mb-1">Bulan ${b}</span>`).join(' ')
+    return flags.length ? flags.map(b => `<span class="badge bg-success me-1">Bulan ${b}</span>`).join(' ') : '—'
   }
 
   const posLabel = (r) => {
     const desa = r?.posyandu?.desa || r?.desa_lama || ''
     const nama = r?.posyandu?.nama || r?.posyandu_lama || ''
     if (!desa && !nama) return '—'
-    if (desa && nama) return `${desa} - Posy. ${nama}`
-    return desa || nama
+    return desa && nama ? `${desa} - Posy. ${nama}` : desa || nama
   }
 
-  const safeBool = (v) => (v === true || v === 1 || v === '1' || String(v).toLowerCase?.() === 'true')
+  const safeBool = (v) => v === true || v === 1 || v === '1' || String(v).toLowerCase?.() === 'true'
 
   try {
-    const res = await api.get(`/log-pengukuran/nik/${nik}`, { headers: { Accept: 'application/json' } })
-    const list = Array.isArray(res.data) ? res.data
-      : Array.isArray(res.data?.data) ? res.data.data
-      : Array.isArray(res.data?.data?.data) ? res.data.data.data
-      : []
+    let list = []
+    if (useCached) {
+      list = allLogsMap.value[nik]
+    } else {
+      // Fallback: fetch individual jika map belum ada
+      const res = await api.get(`/log-pengukuran/nik/${nik}`, { headers: { Accept: 'application/json' } })
+      list = Array.isArray(res.data) ? res.data
+        : Array.isArray(res.data?.data) ? res.data.data : []
+    }
 
-    list.sort((a, b) => {
-      const ax = new Date(a.diubah_pada || a.updated_at || a.tanggal_ukur_lama || a.tanggal_ukur || 0).getTime()
-      const bx = new Date(b.diubah_pada || b.updated_at || b.tanggal_ukur_lama || b.tanggal_ukur || 0).getTime()
-      return bx - ax
-    })
+    list = [...list].sort((a, b) =>
+      new Date(b.diubah_pada || b.updated_at || 0) - new Date(a.diubah_pada || a.updated_at || 0)
+    )
 
     const headerInfo = `
       <div class="mb-3">
@@ -705,11 +641,10 @@ const viewRiwayat = async (nik, nama = '') => {
         <div><span class="badge bg-secondary me-2">NIK</span><code>${nik || '-'}</code></div>
       </div>`
 
-    const rowsHtml = (list || []).map((r, i) => {
+    const rowsHtml = list.map((r, i) => {
       const waktuUbah = r.diubah_pada
         ? new Date(r.diubah_pada).toLocaleString('id-ID')
         : (r.updated_at ? new Date(r.updated_at).toLocaleString('id-ID') : '-')
-
       return `
         <tr>
           <td>${i + 1}</td>
@@ -722,43 +657,30 @@ const viewRiwayat = async (nik, nama = '') => {
           <td>${r.cara_ukur_lama || '-'}</td>
           <td>${r.vit_a_lama || '-'}</td>
           <td>${asiBadges(r)}</td>
-          <td><span class="badge ${safeBool(r.kelas_ibu_balita_lama) ? 'bg-success' : 'bg-secondary'}">
-                ${safeBool(r.kelas_ibu_balita_lama) ? 'Ya' : 'Tidak'}
-              </span></td>
+          <td><span class="badge ${safeBool(r.kelas_ibu_balita_lama) ? 'bg-success' : 'bg-secondary'}">${safeBool(r.kelas_ibu_balita_lama) ? 'Ya' : 'Tidak'}</span></td>
           <td>${waktuUbah}</td>
         </tr>`
     }).join('')
 
-    const html = `${headerInfo}
-      <div style="max-height:70vh; overflow:auto;">
-        <div class="mb-2 small text-muted">Menampilkan ${list.length} entri riwayat.</div>
-        <div class="table-responsive">
-          <table class="table table-sm table-bordered table-striped align-middle table-riwayat">
-            <thead class="table-dark">
-              <tr>
-                <th>No</th>
-                <th>Tanggal Ukur</th>
-                <th>Posyandu (lama)</th>
-                <th>Berat</th>
-                <th>Tinggi</th>
-                <th>LILA</th>
-                <th>Lingkar Kepala</th>
-                <th>Cara Ukur</th>
-                <th>Vitamin A</th>
-                <th>ASI 0–6 (lama)</th>
-                <th>Kelas Ibu (lama)</th>
-                <th>Diubah pada</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml || '<tr><td colspan="12" class="text-center text-muted">Tidak ada riwayat.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>`
-
     Swal.hideLoading()
     Swal.update({
       title: 'Riwayat Pengukuran',
-      html,
+      html: `${headerInfo}
+        <div style="max-height:70vh;overflow:auto;">
+          <div class="mb-2 small text-muted">Menampilkan ${list.length} entri riwayat.</div>
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered table-striped align-middle table-riwayat">
+              <thead class="table-dark">
+                <tr>
+                  <th>No</th><th>Tanggal Ukur</th><th>Posyandu (lama)</th>
+                  <th>Berat</th><th>Tinggi</th><th>LILA</th><th>Lingkar Kepala</th>
+                  <th>Cara Ukur</th><th>Vitamin A</th><th>ASI 0–6</th><th>Kelas Ibu</th><th>Diubah pada</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml || '<tr><td colspan="12" class="text-center text-muted">Tidak ada riwayat.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>`,
       showCloseButton: true,
       showConfirmButton: true,
       confirmButtonText: 'Tutup',
@@ -772,14 +694,12 @@ const viewRiwayat = async (nik, nama = '') => {
     Swal.update({
       title: 'Riwayat Pengukuran',
       html: `<div class="mb-2"><b>${nama || '-'}</b></div>
-             <div class="small text-muted">NIK: <code>${nik || '-'}</code></div>
-             <div class="text-danger mt-2">${e?.response?.data?.message ?? 'Tidak dapat mengambil riwayat pengukuran.'}</div>`,
+             <div class="text-danger mt-2">${e?.response?.data?.message ?? 'Tidak dapat mengambil riwayat.'}</div>`,
       showCloseButton: true,
       showConfirmButton: true,
       confirmButtonText: 'Tutup',
       allowEscapeKey: true,
-      width: '900px',
-      customClass: { popup: 'swal-riwayat', actions: 'swal2-actions-gap', confirmButton: 'btn btn-primary' },
+      customClass: { confirmButton: 'btn btn-primary' },
       buttonsStyling: false
     })
   }
@@ -794,52 +714,46 @@ const deleteData = async (id) => {
     showCancelButton: true,
     confirmButtonText: 'Ya, hapus',
     cancelButtonText: 'Batal',
-    customClass: { 
-      confirmButton: 'btn btn-danger', 
-      cancelButton: 'btn btn-secondary', 
-      actions: 'swal2-actions-gap' 
-    },
+    customClass: { confirmButton: 'btn btn-danger', cancelButton: 'btn btn-secondary', actions: 'swal2-actions-gap' },
     buttonsStyling: false,
   })
   if (!isConfirmed) return
-  
+
   try {
     await api.delete(`/anak-pengukuran/${id}`)
-    await Swal.fire({ 
-      title: 'Terhapus', 
-      text: 'Data berhasil dihapus.', 
-      icon: 'success', 
-      timer: 1400, 
-      showConfirmButton: false 
-    })
-    await fetchData()
-    await enrichDataWithAnomaly()
+    await Swal.fire({ title: 'Terhapus', text: 'Data berhasil dihapus.', icon: 'success', timer: 1400, showConfirmButton: false })
+    clearCache()
+    await Promise.all([fetchData(1), fetchAllLogs()])
+    enrichDataWithAnomaly()
   } catch (e) {
-    await Swal.fire({ 
-      title: 'Gagal', 
-      text: e?.response?.data?.message ?? 'Gagal menghapus data.', 
-      icon: 'error' 
-    })
+    await Swal.fire({ title: 'Gagal', text: e?.response?.data?.message ?? 'Gagal menghapus data.', icon: 'error' })
   }
 }
 
 /* =================== RESET FILTER =================== */
 const resetFilter = () => {
-  q.value = ''
-  filterPosyandu.value = ''
-  tglFrom.value = ''
-  tglTo.value = ''
+  q.value = ''; filterPosyandu.value = ''
+  tglFrom.value = ''; tglTo.value = ''
   beratFrom.value = ''; beratTo.value = ''
   tinggiFrom.value = ''; tinggiTo.value = ''
   lilaFrom.value = ''; lilaTo.value = ''
   lkFrom.value = ''; lkTo.value = ''
   filterAsiMonths.value = []
-  filterVita.value = ''
-  filterKelasIbu.value = ''
+  filterVita.value = ''; filterKelasIbu.value = ''
   showAnomaliesOnly.value = false
 }
-</script>
 
+/* =================== WATCH =================== */
+watch(currentPage, async (newPage) => {
+  if (!loadedPages.value.has(newPage)) await fetchData(newPage)
+  enrichDataWithAnomaly()
+})
+
+// Begitu logs selesai dimuat, langsung enrich
+watch(logsLoaded, (val) => {
+  if (val) enrichDataWithAnomaly()
+})
+</script>
 <template>
   <div class="container mt-5 mb-5">
     <div class="row"><div class="col-md-12">
@@ -855,7 +769,16 @@ const resetFilter = () => {
           <RouterLink :to="{ name: 'anak-pengukuran.export' }" class="btn btn-md btn-warning rounded d-inline-flex align-items-center">
             <font-awesome-icon :icon="['fas','file-export']" class="me-2" />Export Data
           </RouterLink>
+          <button v-if="dataFromSession" @click="resetCache" class="btn btn-md btn-info rounded d-inline-flex align-items-center">
+            <font-awesome-icon :icon="['fas','sync-alt']" class="me-2" />Refresh
+          </button>
         </div>
+      </div>
+
+      <!-- Cache Status Alert -->
+      <div v-if="dataFromSession" class="alert alert-info d-flex align-items-center mb-3">
+        <font-awesome-icon :icon="['fas','database']" class="me-2" />
+        <strong>Data dari Cache (30 menit)</strong> - Hanya load page yang belum di-cache
       </div>
 
       <!-- Anomaly Alert -->
@@ -986,7 +909,7 @@ const resetFilter = () => {
 
           <template v-else>
             <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
-              <span>Total data: {{ rows.length }}</span>
+              <span>Total data: {{ totalItems }} | Halaman: {{ currentPage }} / {{ totalPages }}</span>
               <span>Ditampilkan: {{ filteredRows.length }}</span>
               <span v-if="anomalyCount > 0" class="text-warning">
                 <font-awesome-icon :icon="['fas','exclamation-triangle']" class="me-1" />
@@ -1016,7 +939,6 @@ const resetFilter = () => {
                 </thead>
 
                 <tbody>
-                  <!-- Tampilkan loading ketika data sedang dimuat -->
                   <tr v-if="loading" class="text-center">
                     <td colspan="14">
                       <div class="spinner-border text-primary" role="status">
@@ -1033,7 +955,6 @@ const resetFilter = () => {
 
                   <tr v-for="(item, index) in filteredRows" :key="item?.id ?? index" 
                       :class="{ 'table-warning': item.anomalyInfo?.hasAnomaly }">
-                    <!-- Status Column -->
                     <td class="text-center">
                       <template v-if="item.anomalyInfo?.hasAnomaly">
                         <button 
@@ -1076,8 +997,7 @@ const resetFilter = () => {
                     </td>
 
                     <td class="text-center">
-                      <div class="d-flex justify-content-start flex-wrap gap-2"> <!-- Flexbox wrapper for buttons -->
-                        <!-- Tombol Compare -->
+                      <div class="d-flex justify-content-start flex-wrap gap-2">
                         <button 
                           v-if="item.anomalyInfo?.hasAnomaly"
                           @click.prevent="showDataComparison(item)"
@@ -1086,7 +1006,6 @@ const resetFilter = () => {
                           COMPARE
                         </button>
                       
-                        <!-- Tombol Riwayat -->
                         <button 
                           @click.prevent="viewRiwayat(item?.anak?.nik, item?.anak?.nama_anak)"
                           class="btn btn-sm btn-secondary rounded-sm shadow border-0 me-2"
@@ -1094,7 +1013,6 @@ const resetFilter = () => {
                           RIWAYAT
                         </button>
 
-                        <!-- Tombol Delete -->
                         <button 
                           @click.prevent="deleteData(item?.id)"
                           class="btn btn-sm btn-danger rounded-sm shadow border-0 me-2"
@@ -1103,11 +1021,33 @@ const resetFilter = () => {
                         </button>
                       </div>
                     </td>
-
                   </tr>
                 </tbody>
               </table>
             </div>
+
+            <!-- Pagination -->
+            <nav aria-label="Page navigation" class="mt-4">
+              <ul class="pagination justify-content-center">
+                <li class="page-item" :class="{ disabled: currentPage === 1 }">
+                  <button class="page-link" @click="goToPage(1)" :disabled="currentPage === 1">Pertama</button>
+                </li>
+                <li class="page-item" :class="{ disabled: currentPage === 1 }">
+                  <button class="page-link" @click="goToPage(currentPage - 1)" :disabled="currentPage === 1">Sebelumnya</button>
+                </li>
+
+                <li v-for="page in Math.min(totalPages, 5)" :key="page" class="page-item" :class="{ active: currentPage === page }">
+                  <button class="page-link" @click="goToPage(page)">{{ page }}</button>
+                </li>
+
+                <li class="page-item" :class="{ disabled: currentPage === totalPages }">
+                  <button class="page-link" @click="goToPage(currentPage + 1)" :disabled="currentPage === totalPages">Berikutnya</button>
+                </li>
+                <li class="page-item" :class="{ disabled: currentPage === totalPages }">
+                  <button class="page-link" @click="goToPage(totalPages)" :disabled="currentPage === totalPages">Terakhir</button>
+                </li>
+              </ul>
+            </nav>
           </template>
         </div>
       </div>
