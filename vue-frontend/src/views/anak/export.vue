@@ -5,6 +5,7 @@ import api from '../../api'
 import Swal from 'sweetalert2'
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
+import JSZip from 'jszip'  // ✨ TAMBAHAN: Import JSZip untuk kompresi
 
 /* =================== STATE =================== */
 const anak = ref([])
@@ -223,9 +224,6 @@ const resetFilter = () => {
 }
 
 /* =================== NAMA FILE DINAMIS =================== */
-// Parse "Desa X - Posy. Y" dari label util
-// ========= NAMA FILE DINAMIS =========
-
 // Override singkatan DESA (sesuai permintaan)
 const overrides = {
   'ORO-ORO OMBO': 'ORO',
@@ -266,34 +264,90 @@ function abbrPos(posName) {
 
 /**
  * Bangun nama file:
- * - Jika ada filter Posyandu: "ID <DESA> SBJ <POS> A2.xlsx"
+ * - Jika ada filter Posyandu: "ID <DESA> <POS>.xlsx"
  * - ELSE jika ada filter Desa: "ID <DESA> ALL.xlsx"
  * - ELSE: fallback timestamp
  */
- function buildExportFileName({
-   labelPos,
-   desaName,
-   rowsSample,
- }) {
-   const hasPos = !!(labelPos && String(labelPos).trim())
-   const hasDesa = !!(desaName && String(desaName).trim())
+function buildExportFileName({
+  labelPos,
+  desaName,
+  rowsSample,
+}) {
+  const hasPos = !!(labelPos && String(labelPos).trim())
+  const hasDesa = !!(desaName && String(desaName).trim())
 
-   if (hasPos) {
-     const { desa, pos } = parsePosyanduFromLabel(labelPos, rowsSample)
-     const d = abbrDesa(desa)
-     const p = abbrPos(pos)
-     return `ID ${d} ${p}.xlsx`
-   }
+  if (hasPos) {
+    const { desa, pos } = parsePosyanduFromLabel(labelPos, rowsSample)
+    const d = abbrDesa(desa)
+    const p = abbrPos(pos)
+    return `ID ${d} ${p}.xlsx`
+  }
 
-   if (hasDesa) {
-     const d = abbrDesa(desaName)
-     return `ID ${d} ALL.xlsx`
-   }
+  if (hasDesa) {
+    const d = abbrDesa(desaName)
+    return `ID ${d} ALL.xlsx`
+  }
 
-   const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
-   return `ID ALL DATA ${stamp}.xlsx`
- }
+  const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
+  return `ID ALL DATA ${stamp}.xlsx`
+}
 
+/* =================== KOMPRESI HELPERS ✨ =================== */
+
+/**
+ * Kompresi buffer ke file ZIP dengan kompresi DEFLATE level 9
+ * @param {Buffer} buffer - Buffer file yang akan dikompresi
+ * @param {string} filename - Nama file dalam ZIP
+ * @returns {Promise<Blob>} Blob ZIP terkompresi
+ */
+async function compressToZip(buffer, filename) {
+  try {
+    const zip = new JSZip()
+    zip.file(filename, buffer)
+    
+    const zipBlob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 9 } // Kompresi maksimal (0-9)
+    })
+    
+    return zipBlob
+  } catch (error) {
+    console.error('Error compressing to ZIP:', error)
+    throw new Error('Gagal mengompresi file: ' + error.message)
+  }
+}
+
+/**
+ * Hitung ukuran file dalam format human-readable
+ * @param {number} bytes - Ukuran dalam bytes
+ * @returns {string} Format human-readable (KB, MB)
+ */
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return '0 Bytes'
+  const k = 1024
+  const sizes = ['Bytes', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
+}
+
+/**
+ * Hitung compression ratio dan tampilkan info
+ * @param {number} originalSize - Ukuran awal (bytes)
+ * @param {number} compressedSize - Ukuran setelah kompresi (bytes)
+ * @returns {object} Informasi kompresi
+ */
+function getCompressionInfo(originalSize, compressedSize) {
+  const ratio = Math.round((compressedSize / originalSize) * 100)
+  const saved = originalSize - compressedSize
+  return {
+    original: formatFileSize(originalSize),
+    compressed: formatFileSize(compressedSize),
+    ratio: ratio + '%',
+    saved: formatFileSize(saved),
+    savedPercent: (100 - ratio) + '%'
+  }
+}
 
 /* =================== EXPORT =================== */
 function autoFitColumns(worksheet) {
@@ -330,74 +384,96 @@ async function exportFilteredToExcel() {
     title: 'Konfirmasi Ekspor',
     html: `
       <div class="text-start">
-        <div>Jumlah baris: <b>${filteredRows.value.length}</b></div>
-        ${hasPos ? `<div>Filter Posyandu: <span class="badge bg-dark">${filterPosyandu.value}</span></div>` : ''}
-        ${hasDesa ? `<div>Filter Desa: <span class="badge bg-secondary">${filterDesa.value}</span></div>` : ''}
-        ${(hasPos && hasDesa) ? `<div class="mt-1 small text-muted">Nama file mengikuti <b>Posyandu</b> (prioritas Posyandu).</div>` : ''}
-        <div class="mt-2">Nama file:</div>
-        <code>${fname}</code>
+        <div class="mb-3">
+          <strong>📊 Detail Ekspor:</strong>
+          <div class="mt-2 ms-3">
+            <div>Jumlah baris: <span class="badge bg-dark">${filteredRows.value.length}</span></div>
+            ${hasPos ? `<div>Filter Posyandu: <span class="badge bg-dark">${filterPosyandu.value}</span></div>` : ''}
+            ${hasDesa ? `<div>Filter Desa: <span class="badge bg-secondary">${filterDesa.value}</span></div>` : ''}
+            ${(hasPos && hasDesa) ? `<div class="mt-1 small text-muted">Nama file mengikuti <b>Posyandu</b> (prioritas Posyandu).</div>` : ''}
+            <div class="mt-2">Nama file Excel: <code>${fname}</code></div>
+          </div>
+        </div>
+        
+        <div class="alert alert-info alert-dismissible fade show mb-0" role="alert">
+          <strong>💾 Opsi Kompresi:</strong> File akan disimpan sebagai <code>${fname.replace('.xlsx', '.zip')}</code>
+          <br/><small class="text-muted">Kompresi DEFLATE Level 9 → Ukuran file ~60-70% lebih kecil</small>
+        </div>
       </div>
     `,
     showCancelButton: true,
-    confirmButtonText: 'Ekspor',
+    confirmButtonText: '✓ Ekspor (Compressed)',
+    confirmButtonColor: '#28a745',
     cancelButtonText: 'Batal',
   })
   if (!isConfirmed) return
 
-  // Header persis contoh
-  const header = [
-    'No','anak_ke','tgl_lahir','jenis_kelamin','nomor_KK','NIK','nama_anak',
-    'usia_hamil','berat_lahir','panjang_lahir','lingkar_kepala_lahir',
-    'kia','kia_bayi_kecil','imd','nama_ortu','nik_ortu','hp_ortu','alamat','rt','rw'
-  ]
-
-  const toYa = (v) => (v === true || String(v).toLowerCase() === 'true' || v === 1 || v === '1') ? 'Ya' : ''
-  const formatAlamat = (desaVal, posVal) => {
-    const d = (desaVal || '').toString().trim()
-    const p = (posVal || '').toString().trim()
-    if (d && p) return `Desa ${d} - Posy. ${p}`
-    if (d) return `Desa ${d}`
-    if (p) return `Posy. ${p}`
-    return ''
-  }
-
-  const rowsData = filteredRows.value.map((item, i) => {
-    const label = posyanduLabel(item) || ''
-    const { desa, pos } = parsePosyanduFromLabel(label, [item])
-    const alamat = formatAlamat(desa || getDesa(item), pos || getPosyanduName(item))
-
-    const nik = String(item?.nik ?? '').trim()
-    const nikOut = nik || '-/(BELUM ADA)'
-
-    return [
-      i + 1,
-      item?.anak_ke ?? '',
-      item?.tgl_lahir ?? '',
-      item?.jenis_kelamin ?? '',
-      item?.nomor_KK ?? '',
-      nikOut,
-      item?.nama_anak ?? '',
-      item?.usia_hamil ?? '',
-      item?.berat_lahir ?? '',
-      item?.panjang_lahir ?? '',
-      item?.lingkar_kepala_lahir ?? '',
-      toYa(item?.kia),
-      toYa(item?.kia_bayi_kecil),
-      toYa(item?.imd),
-      item?.nama_ortu ?? '',
-      item?.nik_ortu ?? '',
-      item?.hp_ortu ?? '',
-      alamat,
-      item?.rt ?? '',
-      item?.rw ?? ''
-    ]
+  // Loading state
+  const loadingSwal = Swal.fire({
+    title: 'Memproses...',
+    html: 'Membuat file Excel & mengkompresi...',
+    allowOutsideClick: false,
+    allowEscapeKey: false,
+    didOpen: () => {
+      Swal.showLoading()
+    }
   })
 
   try {
+    // ===== 1. Buat Workbook Excel =====
+    const header = [
+      'No','anak_ke','tgl_lahir','jenis_kelamin','nomor_KK','NIK','nama_anak',
+      'usia_hamil','berat_lahir','panjang_lahir','lingkar_kepala_lahir',
+      'kia','kia_bayi_kecil','imd','nama_ortu','nik_ortu','hp_ortu','alamat','rt','rw'
+    ]
+
+    const toYa = (v) => (v === true || String(v).toLowerCase() === 'true' || v === 1 || v === '1') ? 'Ya' : ''
+    const formatAlamat = (desaVal, posVal) => {
+      const d = (desaVal || '').toString().trim()
+      const p = (posVal || '').toString().trim()
+      if (d && p) return `Desa ${d} - Posy. ${p}`
+      if (d) return `Desa ${d}`
+      if (p) return `Posy. ${p}`
+      return ''
+    }
+
+    const rowsData = filteredRows.value.map((item, i) => {
+      const label = posyanduLabel(item) || ''
+      const { desa, pos } = parsePosyanduFromLabel(label, [item])
+      const alamat = formatAlamat(desa || getDesa(item), pos || getPosyanduName(item))
+
+      const nik = String(item?.nik ?? '').trim()
+      const nikOut = nik || '-/(BELUM ADA)'
+
+      return [
+        i + 1,
+        item?.anak_ke ?? '',
+        item?.tgl_lahir ?? '',
+        item?.jenis_kelamin ?? '',
+        item?.nomor_KK ?? '',
+        nikOut,
+        item?.nama_anak ?? '',
+        item?.usia_hamil ?? '',
+        item?.berat_lahir ?? '',
+        item?.panjang_lahir ?? '',
+        item?.lingkar_kepala_lahir ?? '',
+        toYa(item?.kia),
+        toYa(item?.kia_bayi_kecil),
+        toYa(item?.imd),
+        item?.nama_ortu ?? '',
+        item?.nik_ortu ?? '',
+        item?.hp_ortu ?? '',
+        alamat,
+        item?.rt ?? '',
+        item?.rw ?? ''
+      ]
+    })
+
+    // ===== 2. Setup Workbook =====
     const wb = new ExcelJS.Workbook()
     const ws = wb.addWorksheet('EXPORT_ANAK')
 
-    // Header: kuning, border, align kiri
+    // ===== 3. Format Header =====
     ws.addRow(header)
     ws.getRow(1).eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF00' } }
@@ -405,11 +481,14 @@ async function exportFilteredToExcel() {
       cell.border = { top:{style:'thin'}, left:{style:'thin'}, bottom:{style:'thin'}, right:{style:'thin'} }
     })
 
-    // Body + paksa TEXT untuk nomor_KK (col 5) & NIK (col 6)
+    // ===== 4. Tambah Data =====
     rowsData.forEach(r => ws.addRow(r))
+
+    // ===== 5. Format Data Cells =====
     ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       if (rowNumber === 1) return
       row.eachCell((cell, col) => {
+        // Kolom 5 (nomor_KK) & 6 (NIK) sebagai teks
         if (col === 5 || col === 6) {
           const v = cell.value ?? ''
           cell.value = v === '' ? '' : { richText: [{ text: String(v) }] }
@@ -422,12 +501,82 @@ async function exportFilteredToExcel() {
 
     autoFitColumns(ws)
 
-    const buf = await wb.xlsx.writeBuffer()
-    saveAs(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), fname)
+    // ===== 6. Generate Buffer Excel =====
+    const excelBuffer = await wb.xlsx.writeBuffer()
+    const excelSize = excelBuffer.byteLength
 
-    await Swal.fire('Berhasil', `Ekspor <b>${rowsData.length}</b> baris ke <b>${fname}</b>.`, 'success')
+    // ===== 7. Kompresi ke ZIP ✨ =====
+    const zipBlob = await compressToZip(excelBuffer, fname)
+    const zipSize = zipBlob.size
+    const zipFileName = fname.replace('.xlsx', '.zip')
+
+    // ===== 8. Hitung Info Kompresi =====
+    const compressionInfo = getCompressionInfo(excelSize, zipSize)
+
+    // ===== 9. Close loading modal & show success ✨ =====
+    Swal.close()  // ← FIX: Close loading modal dulu
+    
+    // ===== 10. Simpan File =====
+    saveAs(zipBlob, zipFileName)
+
+    // ===== 11. Show success dialog dengan info kompresi ✨ =====
+    await Swal.fire({
+      icon: 'success',
+      title: 'Ekspor Berhasil! ✓',
+      html: `
+        <div class="text-start">
+          <div class="mb-3">
+            <strong>📊 Hasil Ekspor:</strong>
+            <div class="mt-2 ms-3">
+              <div>Baris data: <span class="badge bg-success">${rowsData.length}</span></div>
+              <div>Nama file: <code>${zipFileName}</code></div>
+            </div>
+          </div>
+          
+          <div class="alert alert-success" role="alert">
+            <strong>📦 Informasi Kompresi:</strong>
+            <table class="table table-sm table-borderless mt-2 mb-0">
+              <tr>
+                <td><strong>Ukuran Awal:</strong></td>
+                <td class="text-end"><code>${compressionInfo.original}</code></td>
+              </tr>
+              <tr>
+                <td><strong>Ukuran Terkompresi:</strong></td>
+                <td class="text-end"><code>${compressionInfo.compressed}</code></td>
+              </tr>
+              <tr>
+                <td><strong>Rasio Kompresi:</strong></td>
+                <td class="text-end"><span class="badge bg-info">${compressionInfo.ratio}</span></td>
+              </tr>
+              <tr class="table-success">
+                <td><strong>Hemat Ruang:</strong></td>
+                <td class="text-end"><span class="badge bg-success">${compressionInfo.saved} (${compressionInfo.savedPercent})</span></td>
+              </tr>
+            </table>
+          </div>
+        </div>
+      `,
+      confirmButtonText: 'OK'
+    })
+
   } catch (e) {
-    await Swal.fire('Gagal ekspor', e?.message ?? 'Terjadi kesalahan saat membuat file Excel.', 'error')
+    // ===== Error Handling =====
+    Swal.close()  // ← FIX: Close loading modal dulu
+    
+    console.error('Export error:', e)
+    await Swal.fire({
+      icon: 'error',
+      title: 'Gagal Ekspor',
+      html: `
+        <div class="text-start">
+          <p><strong>Error:</strong> ${e?.message ?? 'Terjadi kesalahan saat membuat file Excel.'}</p>
+          <details style="text-align: left; font-size: 0.85rem; color: #666;">
+            <summary>Detail Error</summary>
+            <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin-top: 10px; overflow-x: auto;">${e?.stack ?? e?.toString()}</pre>
+          </details>
+        </div>
+      `
+    })
   }
 }
 </script>
