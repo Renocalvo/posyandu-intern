@@ -65,8 +65,9 @@ const clearCache = () => {
   sessionStorage.removeItem(getCacheKey('data'))
   sessionStorage.removeItem(getCacheKey('meta'))
   sessionStorage.removeItem(getCacheKey('logs'))
-  loadedPages.value.clear()
+  loadedPages.value = new Set()   // assignment baru agar reactivity trigger
   apk.value = []
+  totalItems.value = 0
   currentPage.value = 1
   dataFromSession.value = false
   allLogsMap.value = {}
@@ -147,11 +148,17 @@ const fetchData = async (page = 1) => {
       items = response.data
     }
 
-    const startIndex = (page - 1) * PAGE_SIZE
-    const newApk = [...apk.value]
-    items.forEach((item, idx) => { newApk[startIndex + idx] = item })
+    // Jika page 1 dan array kosong (setelah clearCache), langsung replace —
+    // jangan merge ke array lama yang mungkin masih ada sisa data
+    if (page === 1 && apk.value.length === 0) {
+      apk.value = items
+    } else {
+      const startIndex = (page - 1) * PAGE_SIZE
+      const newApk = [...apk.value]
+      items.forEach((item, idx) => { newApk[startIndex + idx] = item })
+      apk.value = newApk
+    }
 
-    apk.value = newApk
     totalItems.value = meta.total || items.length
     loadedPages.value.add(page)
 
@@ -186,9 +193,10 @@ onMounted(async () => {
   enrichDataWithAnomaly()
 })
 
-const resetCache = () => {
+const resetCache = async () => {
   clearCache()
-  Promise.all([fetchData(1), fetchAllLogs()]).then(() => enrichDataWithAnomaly())
+  await Promise.all([fetchData(1), fetchAllLogs()])
+  enrichDataWithAnomaly()
 }
 
 /* =================== PAGINATION =================== */
@@ -716,8 +724,10 @@ const saveEditedData = async (item, editedValues) => {
       showConfirmButton: false
     })
 
+    // Sequential: pastikan apk kosong dulu sebelum fetchData mengisi ulang
     clearCache()
-    await Promise.all([fetchData(1), fetchAllLogs()])
+    await fetchData(1)
+    await fetchAllLogs()
     enrichDataWithAnomaly()
 
   } catch (error) {
@@ -887,8 +897,10 @@ const deleteData = async (id) => {
       timer: 1400,
       showConfirmButton: false
     })
+    // Sequential: clearCache dulu, baru fetch ulang dari nol
     clearCache()
-    await Promise.all([fetchData(1), fetchAllLogs()])
+    await fetchData(1)
+    await fetchAllLogs()
     enrichDataWithAnomaly()
   } catch (e) {
     await Swal.fire({
